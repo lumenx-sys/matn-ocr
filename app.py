@@ -1,8 +1,12 @@
-import streamlit as st
 import os
 import base64
 import time
 import tempfile
+import json
+import threading
+import io
+
+from flask import Flask, request, jsonify, Response, send_file
 import anthropic
 import arabic_reshaper
 from bidi.algorithm import get_display
@@ -13,133 +17,11 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import mm
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
-import io
 
-# ── Page config ───────────────────────────────────────────────────────────────
-st.set_page_config(
-    page_title="Matn OCR",
-    page_icon="📜",
-    layout="centered",
-    initial_sidebar_state="collapsed",
-)
+app = Flask(__name__)
 
-# ── Custom CSS ────────────────────────────────────────────────────────────────
-st.markdown("""
-<style>
-@import url('https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;700&family=EB+Garamond:ital,wght@0,400;0,600;1,400&display=swap');
-
-:root {
-    --bg:       #0e0c09;
-    --surface:  #181410;
-    --border:   #2e2820;
-    --gold:     #c9a84c;
-    --gold-dim: #7a6330;
-    --text:     #e8dfc8;
-    --muted:    #8a7d66;
-}
-
-html, body, [data-testid="stAppViewContainer"] {
-    background: var(--bg) !important;
-    color: var(--text) !important;
-    font-family: 'EB Garamond', Georgia, serif;
-}
-[data-testid="stHeader"] { background: transparent !important; }
-#MainMenu, footer, header { visibility: hidden; }
-
-.hero {
-    text-align: center;
-    padding: 3rem 0 2rem;
-    border-bottom: 1px solid var(--border);
-    margin-bottom: 2.5rem;
-}
-.hero-arabic {
-    font-size: 2.2rem;
-    color: var(--gold);
-    letter-spacing: 0.15em;
-    margin-bottom: 0.3rem;
-    font-family: 'Playfair Display', serif;
-}
-.hero-title {
-    font-family: 'Playfair Display', serif;
-    font-size: 2.8rem;
-    font-weight: 700;
-    color: var(--text);
-    letter-spacing: 0.05em;
-    margin: 0;
-}
-.hero-sub {
-    color: var(--muted);
-    font-style: italic;
-    font-size: 1.1rem;
-    margin-top: 0.5rem;
-}
-.section-label {
-    font-family: 'Playfair Display', serif;
-    font-size: 0.75rem;
-    letter-spacing: 0.2em;
-    text-transform: uppercase;
-    color: var(--gold-dim);
-    margin-bottom: 0.5rem;
-}
-.ornament {
-    text-align: center;
-    color: var(--gold-dim);
-    font-size: 1.2rem;
-    margin: 1.5rem 0;
-    letter-spacing: 0.5em;
-}
-.log-box {
-    background: #080705;
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    padding: 1rem 1.2rem;
-    font-family: 'Courier New', monospace;
-    font-size: 0.82rem;
-    color: #a89a7a;
-    max-height: 280px;
-    overflow-y: auto;
-    line-height: 1.7;
-    white-space: pre-wrap;
-}
-[data-testid="stTextInput"] input,
-[data-testid="stSelectbox"] select,
-[data-testid="stNumberInput"] input {
-    background: var(--surface) !important;
-    border: 1px solid var(--border) !important;
-    color: var(--text) !important;
-    border-radius: 4px !important;
-}
-.stButton > button {
-    background: var(--gold) !important;
-    color: #0e0c09 !important;
-    border: none !important;
-    border-radius: 3px !important;
-    font-family: 'Playfair Display', serif !important;
-    font-size: 1rem !important;
-    font-weight: 700 !important;
-    letter-spacing: 0.08em !important;
-    padding: 0.6rem 2rem !important;
-    width: 100% !important;
-}
-.stButton > button:hover { opacity: 0.85 !important; }
-[data-testid="stDownloadButton"] > button {
-    background: transparent !important;
-    color: var(--gold) !important;
-    border: 1px solid var(--gold-dim) !important;
-    border-radius: 3px !important;
-    font-family: 'EB Garamond', serif !important;
-    font-size: 1rem !important;
-    width: 100% !important;
-    margin-top: 0.5rem !important;
-}
-</style>
-""", unsafe_allow_html=True)
-
-
-# ── Font registration (cached, runs once per server session) ──────────────────
-@st.cache_resource
-def register_arabic_font():
-    """Register a Unicode-capable font for Arabic PDF output."""
+# ── Font registration ─────────────────────────────────────────────────────────
+def register_font():
     candidates = [
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
@@ -150,41 +32,14 @@ def register_arabic_font():
         if os.path.exists(path):
             pdfmetrics.registerFont(TTFont("Arabic", path))
             return
-
-    # Fallback: download Amiri (a proper Arabic font) from a reliable CDN
     import urllib.request
     font_path = "/tmp/arabic_font.ttf"
     if not os.path.exists(font_path):
-        url = "https://fonts.gstatic.com/s/amiri/v27/J7aRnpd8CGxBHqUpvrIw74NL.woff2"
-        # woff2 won't work for reportlab — use a TTF CDN instead
-        url = "https://github.com/alif-type/amiri/releases/download/1.000/Amiri-1.000.zip"
-        # Simpler: just grab the TTF directly from jsDelivr
         url = "https://cdn.jsdelivr.net/npm/@fontsource/amiri@5.0.8/files/amiri-arabic-400-normal.ttf"
-        try:
-            urllib.request.urlretrieve(url, font_path)
-            pdfmetrics.registerFont(TTFont("Arabic", font_path))
-            return
-        except Exception:
-            pass
+        urllib.request.urlretrieve(url, font_path)
+    pdfmetrics.registerFont(TTFont("Arabic", font_path))
 
-    # Last resort: use Helvetica (limited Arabic support but won't crash)
-    pdfmetrics.registerFont(TTFont("Arabic", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"))
-
-
-register_arabic_font()
-
-
-# ── PDF styles (defined after font registration) ──────────────────────────────
-def get_styles():
-    base = getSampleStyleSheet()
-    heading = ParagraphStyle("MatnHeading", parent=base["Heading2"], spaceAfter=6)
-    arabic  = ParagraphStyle("MatnArabic",  parent=base["Normal"],
-                              fontName="Arabic", fontSize=12, leading=22,
-                              spaceAfter=4, alignment=2)
-    trans   = ParagraphStyle("MatnTrans",   parent=base["Normal"],
-                              fontSize=11, leading=18, spaceAfter=4, alignment=0)
-    return heading, arabic, trans
-
+register_font()
 
 # ── Prompts ───────────────────────────────────────────────────────────────────
 TRANSCRIBE_PROMPT = """You are a precise Arabic OCR transcription engine.
@@ -220,7 +75,7 @@ Rules:
 - Output only the translation, nothing else"""
 
 
-# ── Core functions ────────────────────────────────────────────────────────────
+# ── Core helpers ──────────────────────────────────────────────────────────────
 def image_to_base64(img):
     buf = io.BytesIO()
     img.save(buf, format="JPEG", quality=95)
@@ -234,15 +89,12 @@ def call_claude(client, **kwargs):
             return client.messages.create(**kwargs)
         except Exception as e:
             if attempt < max_retries - 1:
-                wait = 10 * (attempt + 1)
-                time.sleep(wait)
+                time.sleep(10 * (attempt + 1))
             else:
                 raise e
 
 
-
-
-def transcribe_page(client, img, _unused=None):
+def transcribe_page(client, img):
     img_b64 = image_to_base64(img)
     msg = call_claude(client,
         model="claude-sonnet-4-6", max_tokens=4096,
@@ -256,7 +108,7 @@ def transcribe_page(client, img, _unused=None):
     return msg.content[0].text
 
 
-def translate_page(client, arabic_text, translation_prompt, _unused=None):
+def translate_text(client, arabic_text, translation_prompt):
     msg = call_claude(client,
         model="claude-sonnet-4-6", max_tokens=4096,
         system=translation_prompt,
@@ -270,7 +122,6 @@ def fix_arabic(text):
 
 
 def sanitize(text):
-    """Replace special characters that basic fonts cannot render."""
     replacements = {
         "\u2018": "'", "\u2019": "'",
         "\u201c": '"', "\u201d": '"',
@@ -282,6 +133,20 @@ def sanitize(text):
     return text.encode("ascii", errors="ignore").decode("ascii")
 
 
+_style_counter = [0]
+
+def get_styles():
+    """Create styles with unique names to avoid ReportLab duplicate registration errors."""
+    _style_counter[0] += 1
+    n = _style_counter[0]
+    base = getSampleStyleSheet()
+    heading = ParagraphStyle(f"MatnHeading{n}", parent=base["Heading2"], spaceAfter=6)
+    arabic  = ParagraphStyle(f"MatnArabic{n}", parent=base["Normal"],
+                              fontName="Arabic", fontSize=12, leading=22,
+                              spaceAfter=4, alignment=2)
+    trans   = ParagraphStyle(f"MatnTrans{n}",  parent=base["Normal"],
+                              fontSize=11, leading=18, spaceAfter=4, alignment=0)
+    return heading, arabic, trans
 
 
 def add_arabic_page(story, page_num, text, styles):
@@ -323,9 +188,17 @@ def build_pdf_bytes(story):
     return buf.getvalue()
 
 
-def run_ocr_inline(api_key, pdf_bytes, start_page, end_page,
-                   do_translate, target_lang, mode, manual_context, status_obj):
-    """Run OCR in the main Streamlit thread using st.status for live updates."""
+# ── Job storage (in-memory, fine for single-server Railway deploy) ─────────────
+jobs = {}  # job_id -> {"status": ..., "log": [...], "outputs": {...}, "error": ...}
+
+
+def run_job(job_id, api_key, pdf_bytes, start_page, end_page,
+            do_translate, target_lang, mode, manual_context):
+    job = jobs[job_id]
+
+    def log(msg):
+        job["log"].append(msg)
+
     tmp_pdf = None
     try:
         client = anthropic.Anthropic(api_key=api_key)
@@ -334,26 +207,24 @@ def run_ocr_inline(api_key, pdf_bytes, start_page, end_page,
             f.write(pdf_bytes)
             tmp_pdf = f.name
 
-        status_obj.write("🔄 Converting PDF pages to images...")
+        log("🔄 Converting PDF pages to images...")
         conv_kwargs = dict(dpi=300)
-        if start_page:
-            conv_kwargs["first_page"] = start_page
-        if end_page:
-            conv_kwargs["last_page"] = end_page
+        if start_page: conv_kwargs["first_page"] = start_page
+        if end_page:   conv_kwargs["last_page"]  = end_page
         images = convert_from_path(tmp_pdf, **conv_kwargs)
         base_page = start_page if start_page else 1
         page_numbers = list(range(base_page, base_page + len(images)))
-        status_obj.write(f"✅ {len(images)} pages ready")
+        log(f"✅ {len(images)} pages ready")
 
         translation_prompt = None
         if do_translate:
             if manual_context and manual_context.strip():
                 context = manual_context.strip()
-                status_obj.write(f"📖 Using manual context: {context}")
+                log(f"📖 Using manual context: {context}")
             else:
-                status_obj.write("🔍 Auto-detecting book context...")
+                log("🔍 Auto-detecting book context...")
                 img_b64 = image_to_base64(images[0])
-                msg = client.messages.create(
+                msg = call_claude(client,
                     model="claude-sonnet-4-6", max_tokens=300,
                     system=DETECT_PROMPT,
                     messages=[{"role": "user", "content": [
@@ -363,30 +234,30 @@ def run_ocr_inline(api_key, pdf_bytes, start_page, end_page,
                     ]}]
                 )
                 context = msg.content[0].text.strip()
-                status_obj.write(f"  📖 Detected: {context}")
+                log(f"  📖 Detected: {context}")
             translation_prompt = build_translation_prompt(target_lang, context)
 
         pages_data = []
         for i, (img, pnum) in enumerate(zip(images, page_numbers)):
-            status_obj.write(f"🤖 Transcribing page {pnum} ({i+1}/{len(images)})...")
+            log(f"🤖 Transcribing page {pnum} ({i+1}/{len(images)})...")
             try:
-                arabic = transcribe_page(client, img, None)
+                arabic = transcribe_page(client, img)
             except Exception as e:
-                status_obj.write(f"  ❌ Failed to transcribe page {pnum}: {e}")
-                arabic = f"[Error transcribing page {pnum}: {e}]"
+                log(f"  ❌ Failed to transcribe page {pnum}: {e}")
+                arabic = f"[Error transcribing page {pnum}]"
 
             translation = None
             if do_translate:
-                status_obj.write(f"🌍 Translating page {pnum} to {target_lang.title()}...")
+                log(f"🌍 Translating page {pnum} to {target_lang.title()}...")
                 try:
-                    translation = translate_page(client, arabic, translation_prompt, None)
+                    translation = translate_text(client, arabic, translation_prompt)
                 except Exception as e:
-                    status_obj.write(f"  ❌ Failed to translate page {pnum}: {e}")
-                    translation = f"[Error translating page {pnum}: {e}]"
+                    log(f"  ❌ Failed to translate page {pnum}: {e}")
+                    translation = f"[Error translating page {pnum}]"
 
             pages_data.append((pnum, arabic, translation))
 
-        status_obj.write("📝 Building output PDF(s)...")
+        log("📝 Building output PDF(s)...")
         outputs = {}
 
         if not do_translate:
@@ -417,104 +288,409 @@ def run_ocr_inline(api_key, pdf_bytes, start_page, end_page,
                 add_translation_page(tr_story, pnum, trans, target_lang, styles_tr)
             outputs[f"transcription_{target_lang}.pdf"] = build_pdf_bytes(tr_story)
 
-        return outputs
+        job["outputs"] = outputs
+        job["status"] = "done"
+        log("✅ Done!")
 
+    except Exception as e:
+        job["status"] = "error"
+        job["error"] = str(e)
+        log(f"❌ Fatal error: {e}")
     finally:
         if tmp_pdf and os.path.exists(tmp_pdf):
             os.unlink(tmp_pdf)
+        # Clean up old jobs — keep only the 20 most recent to avoid memory leaks
+        if len(jobs) > 20:
+            oldest_keys = list(jobs.keys())[:-20]
+            for k in oldest_keys:
+                jobs.pop(k, None)
 
 
-# ── UI ────────────────────────────────────────────────────────────────────────
-st.markdown("""
-<div class="hero">
-    <div class="hero-arabic">متن</div>
-    <div class="hero-title">Matn OCR</div>
-    <div class="hero-sub">Arabic manuscript transcription &amp; translation</div>
-</div>
-""", unsafe_allow_html=True)
+# ── Routes ────────────────────────────────────────────────────────────────────
+@app.route("/")
+def index():
+    return HTML_PAGE
 
-st.markdown('<div class="section-label">Anthropic API Key</div>', unsafe_allow_html=True)
-api_key = st.text_input("", type="password", placeholder="sk-ant-...",
-                         label_visibility="collapsed")
-st.caption("Your key is never stored. Get one at console.anthropic.com")
 
-st.markdown('<div class="ornament">· · ·</div>', unsafe_allow_html=True)
+@app.route("/start", methods=["POST"])
+def start():
+    import uuid
+    api_key       = request.form.get("api_key", "").strip()
+    do_translate  = request.form.get("do_translate") == "true"
+    target_lang   = request.form.get("target_lang", "english").strip()
+    mode          = request.form.get("mode", "interleaved")
+    manual_context= request.form.get("manual_context", "").strip()
+    use_range     = request.form.get("use_range") == "true"
+    start_page    = int(request.form.get("start_page", 1)) if use_range else None
+    end_page      = int(request.form.get("end_page", 1))   if use_range else None
 
-st.markdown('<div class="section-label">Upload PDF</div>', unsafe_allow_html=True)
-uploaded_file = st.file_uploader("", type=["pdf"], label_visibility="collapsed")
-
-st.markdown('<div class="ornament">· · ·</div>', unsafe_allow_html=True)
-
-st.markdown('<div class="section-label">Options</div>', unsafe_allow_html=True)
-
-col1, col2 = st.columns(2)
-with col1:
-    use_page_range = st.checkbox("Specific page range")
-with col2:
-    do_translate = st.checkbox("Translate")
-
-start_page = end_page = None
-if use_page_range:
-    c1, c2 = st.columns(2)
-    with c1:
-        start_page = st.number_input("From page", min_value=1, value=1, step=1)
-    with c2:
-        end_page = st.number_input("To page", min_value=1, value=10, step=1)
-
-target_lang = mode = manual_context = None
-if do_translate:
-    target_lang = st.text_input("Target language", value="english",
-                                 placeholder="english, french, urdu...")
-    mode = st.selectbox(
-        "Output format", ["interleaved", "separate"],
-        format_func=lambda x: "Arabic + Translation in one PDF"
-                               if x == "interleaved" else "Two separate PDFs"
-    )
-    manual_context = st.text_input(
-        "Context override (optional)",
-        placeholder='e.g. "classical Arabic poetry" — leave blank to auto-detect'
-    )
-
-st.markdown('<div class="ornament">· · ·</div>', unsafe_allow_html=True)
-
-run = st.button("Begin Transcription")
-
-if run:
     if not api_key:
-        st.error("Please enter your Anthropic API key.")
-    elif not uploaded_file:
-        st.error("Please upload a PDF file.")
-    elif do_translate and not target_lang:
-        st.error("Please enter a target language.")
-    else:
-        pdf_bytes = uploaded_file.read()
-        outputs = None
-        error = None
+        return jsonify({"error": "API key required"}), 400
 
-        with st.status("Processing...", expanded=True) as status:
-            try:
-                outputs = run_ocr_inline(
-                    api_key, pdf_bytes,
-                    int(start_page) if use_page_range and start_page else None,
-                    int(end_page) if use_page_range and end_page else None,
-                    do_translate, target_lang, mode, manual_context,
-                    status
-                )
-                status.update(label="✅ Complete!", state="complete", expanded=False)
-            except Exception as e:
-                error = str(e)
-                status.update(label=f"❌ Failed: {e}", state="error", expanded=True)
+    pdf_file = request.files.get("pdf")
+    if not pdf_file:
+        return jsonify({"error": "PDF required"}), 400
 
-        if outputs:
-            st.markdown('<div class="ornament">· · ·</div>', unsafe_allow_html=True)
-            st.markdown('<div class="section-label">Download</div>', unsafe_allow_html=True)
-            for filename, data in outputs.items():
-                st.download_button(
-                    label=f"⬇ Download {filename}",
-                    data=data,
-                    file_name=filename,
-                    mime="application/pdf"
-                )
-        elif error:
-            st.error(f"Something went wrong: {error}")
+    pdf_bytes = pdf_file.read()
+    job_id = str(uuid.uuid4())
+    jobs[job_id] = {"status": "running", "log": [], "outputs": {}, "error": None}
+
+    t = threading.Thread(
+        target=run_job,
+        args=(job_id, api_key, pdf_bytes, start_page, end_page,
+              do_translate, target_lang, mode, manual_context),
+        daemon=True
+    )
+    t.start()
+
+    return jsonify({"job_id": job_id})
+
+
+@app.route("/progress/<job_id>")
+def progress(job_id):
+    """Server-Sent Events stream for live progress updates."""
+    def generate():
+        sent = 0
+        while True:
+            job = jobs.get(job_id)
+            if not job:
+                yield f"data: {json.dumps({'log': 'Job not found', 'status': 'error'})}\n\n"
+                break
+
+            log = job["log"]
+            # Send any new log lines
+            while sent < len(log):
+                yield f"data: {json.dumps({'log': log[sent], 'status': job['status']})}\n\n"
+                sent += 1
+
+            if job["status"] in ("done", "error"):
+                yield f"data: {json.dumps({'log': '', 'status': job['status'], 'files': list(job['outputs'].keys())})}\n\n"
+                break
+
+            time.sleep(0.5)
+
+    return Response(generate(), mimetype="text/event-stream",
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+@app.route("/download/<job_id>/<filename>")
+def download(job_id, filename):
+    job = jobs.get(job_id)
+    if not job or filename not in job["outputs"]:
+        return "File not found", 404
+    data = job["outputs"][filename]
+    return send_file(
+        io.BytesIO(data),
+        mimetype="application/pdf",
+        as_attachment=True,
+        download_name=filename
+    )
+
+
+# ── HTML (single-file app) ────────────────────────────────────────────────────
+HTML_PAGE = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Matn OCR</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;700&family=EB+Garamond:ital,wght@0,400;0,600;1,400&display=swap" rel="stylesheet">
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+:root {
+  --bg:      #0e0c09;
+  --surface: #161210;
+  --border:  #2a2218;
+  --gold:    #c9a84c;
+  --gold-d:  #7a6330;
+  --text:    #e8dfc8;
+  --muted:   #8a7d66;
+}
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'EB Garamond', Georgia, serif;
+  min-height: 100vh;
+  display: flex;
+  justify-content: center;
+  padding: 0 1rem 4rem;
+}
+.wrap { width: 100%; max-width: 640px; }
+
+/* Hero */
+.hero {
+  text-align: center;
+  padding: 3.5rem 0 2.5rem;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 2.5rem;
+}
+.hero-ar  { font-size: 2rem; color: var(--gold); letter-spacing: .2em; }
+.hero-h1  { font-family: 'Playfair Display', serif; font-size: 3rem;
+             font-weight: 700; letter-spacing: .04em; margin: .2rem 0 .5rem; }
+.hero-sub { color: var(--muted); font-style: italic; font-size: 1.1rem; }
+
+/* Section label */
+.label {
+  font-family: 'Playfair Display', serif;
+  font-size: .7rem; letter-spacing: .22em; text-transform: uppercase;
+  color: var(--gold-d); margin-bottom: .5rem; margin-top: 1.8rem;
+}
+
+/* Ornament */
+.orn { text-align: center; color: var(--gold-d); margin: 1.6rem 0; letter-spacing: .6em; }
+
+/* Inputs */
+input[type=text], input[type=password], select {
+  width: 100%; background: var(--surface); border: 1px solid var(--border);
+  color: var(--text); border-radius: 3px; padding: .6rem .8rem;
+  font-family: 'EB Garamond', serif; font-size: 1rem; outline: none;
+}
+input:focus, select:focus { border-color: var(--gold-d); }
+.caption { color: var(--muted); font-size: .85rem; margin-top: .35rem; font-style: italic; }
+
+/* File upload */
+.file-drop {
+  border: 1px dashed var(--border); border-radius: 3px;
+  background: var(--surface); padding: 1.4rem;
+  text-align: center; cursor: pointer; transition: border-color .2s;
+}
+.file-drop:hover { border-color: var(--gold-d); }
+.file-drop input { display: none; }
+.file-drop .icon { font-size: 1.8rem; margin-bottom: .4rem; }
+.file-drop .hint { color: var(--muted); font-size: .9rem; }
+.file-name { color: var(--gold); font-size: .9rem; margin-top: .4rem; }
+
+/* Checkboxes */
+.checks { display: flex; gap: 2rem; margin-top: .3rem; }
+.checks label { display: flex; align-items: center; gap: .5rem;
+                cursor: pointer; font-size: 1rem; }
+.checks input[type=checkbox] { accent-color: var(--gold); width: 1rem; height: 1rem; }
+
+/* Page range row */
+.row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-top: .8rem; }
+input[type=number] {
+  width: 100%; background: var(--surface); border: 1px solid var(--border);
+  color: var(--text); border-radius: 3px; padding: .6rem .8rem;
+  font-family: 'EB Garamond', serif; font-size: 1rem; outline: none;
+}
+
+/* Button */
+.btn {
+  width: 100%; margin-top: 1.8rem;
+  background: var(--gold); color: #0e0c09; border: none; border-radius: 3px;
+  font-family: 'Playfair Display', serif; font-size: 1.1rem; font-weight: 700;
+  letter-spacing: .08em; padding: .75rem 2rem; cursor: pointer; transition: opacity .2s;
+}
+.btn:hover { opacity: .85; }
+.btn:disabled { opacity: .4; cursor: not-allowed; }
+
+/* Log */
+.log-wrap { margin-top: 1.5rem; display: none; }
+.log-box {
+  background: #070604; border: 1px solid var(--border); border-radius: 3px;
+  padding: 1rem 1.1rem; font-family: 'Courier New', monospace; font-size: .82rem;
+  color: #a89a7a; max-height: 300px; overflow-y: auto; line-height: 1.75;
+  white-space: pre-wrap;
+}
+
+/* Downloads */
+.dl-wrap { margin-top: 1.5rem; display: none; }
+.dl-btn {
+  display: block; width: 100%; margin-top: .6rem; padding: .65rem 1rem;
+  background: transparent; border: 1px solid var(--gold-d); border-radius: 3px;
+  color: var(--gold); font-family: 'EB Garamond', serif; font-size: 1rem;
+  text-align: center; text-decoration: none; transition: background .2s;
+}
+.dl-btn:hover { background: rgba(201,168,76,.07); }
+
+/* Error */
+.err { color: #c47a7a; background: #1a0e0e; border: 1px solid #4a2020;
+       border-radius: 3px; padding: .8rem 1rem; margin-top: 1rem; font-size: .95rem; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="hero">
+    <div class="hero-ar">متن</div>
+    <h1 class="hero-h1">Matn OCR</h1>
+    <p class="hero-sub">Arabic manuscript transcription &amp; translation</p>
+  </div>
+
+  <form id="form" enctype="multipart/form-data">
+
+    <div class="label">Anthropic API Key</div>
+    <input type="password" name="api_key" id="api_key" placeholder="sk-ant-...">
+    <p class="caption">Your key is never stored. Get one at console.anthropic.com</p>
+
+    <div class="orn">· · ·</div>
+
+    <div class="label">Upload PDF</div>
+    <label class="file-drop" id="drop">
+      <input type="file" name="pdf" id="pdf" accept=".pdf">
+      <div class="icon">📜</div>
+      <div class="hint">Click to browse or drag &amp; drop</div>
+      <div class="file-name" id="fname"></div>
+    </label>
+
+    <div class="orn">· · ·</div>
+
+    <div class="label">Options</div>
+    <div class="checks">
+      <label><input type="checkbox" id="use_range"> Specific page range</label>
+      <label><input type="checkbox" id="use_trans"> Translate</label>
+    </div>
+
+    <div id="range_fields" style="display:none">
+      <div class="row2">
+        <div>
+          <div class="label">From page</div>
+          <input type="number" name="start_page" value="1" min="1">
+        </div>
+        <div>
+          <div class="label">To page</div>
+          <input type="number" name="end_page" value="10" min="1">
+        </div>
+      </div>
+    </div>
+
+    <div id="trans_fields" style="display:none">
+      <div class="label" style="margin-top:1rem">Target language</div>
+      <input type="text" name="target_lang" value="english" placeholder="english, french, urdu...">
+
+      <div class="label">Output format</div>
+      <select name="mode">
+        <option value="interleaved">Arabic + Translation in one PDF</option>
+        <option value="separate">Two separate PDFs</option>
+      </select>
+
+      <div class="label">Context override (optional)</div>
+      <input type="text" name="manual_context" placeholder='e.g. "classical Arabic poetry" — leave blank to auto-detect'>
+    </div>
+
+    <input type="hidden" name="use_range" id="h_use_range" value="false">
+    <input type="hidden" name="do_translate" id="h_do_translate" value="false">
+
+    <button type="submit" class="btn" id="submit_btn">Begin Transcription</button>
+  </form>
+
+  <div id="err_box" class="err" style="display:none"></div>
+
+  <div class="log-wrap" id="log_wrap">
+    <div class="label">Progress</div>
+    <div class="log-box" id="log_box"></div>
+  </div>
+
+  <div class="dl-wrap" id="dl_wrap">
+    <div class="orn">· · ·</div>
+    <div class="label">Download</div>
+    <div id="dl_links"></div>
+  </div>
+
+</div>
+
+<script>
+// Show/hide optional fields
+document.getElementById('use_range').addEventListener('change', function() {
+  document.getElementById('range_fields').style.display = this.checked ? 'block' : 'none';
+  document.getElementById('h_use_range').value = this.checked ? 'true' : 'false';
+});
+document.getElementById('use_trans').addEventListener('change', function() {
+  document.getElementById('trans_fields').style.display = this.checked ? 'block' : 'none';
+  document.getElementById('h_do_translate').value = this.checked ? 'true' : 'false';
+});
+
+// Show filename when selected
+document.getElementById('pdf').addEventListener('change', function() {
+  document.getElementById('fname').textContent = this.files[0] ? this.files[0].name : '';
+});
+
+// Form submit
+document.getElementById('form').addEventListener('submit', async function(e) {
+  e.preventDefault();
+
+  const errBox = document.getElementById('err_box');
+  errBox.style.display = 'none';
+
+  const apiKey = document.getElementById('api_key').value.trim();
+  const pdfFile = document.getElementById('pdf').files[0];
+  if (!apiKey) { errBox.textContent = 'Please enter your Anthropic API key.'; errBox.style.display = 'block'; return; }
+  if (!pdfFile) { errBox.textContent = 'Please upload a PDF file.'; errBox.style.display = 'block'; return; }
+
+  const btn = document.getElementById('submit_btn');
+  btn.disabled = true;
+  btn.textContent = 'Processing...';
+
+  // Reset UI
+  document.getElementById('log_wrap').style.display = 'block';
+  document.getElementById('log_box').textContent = '';
+  document.getElementById('dl_wrap').style.display = 'none';
+  document.getElementById('dl_links').innerHTML = '';
+
+  // Submit form
+  const fd = new FormData(this);
+  let jobId;
+  try {
+    const res = await fetch('/start', { method: 'POST', body: fd });
+    const data = await res.json();
+    if (data.error) { throw new Error(data.error); }
+    jobId = data.job_id;
+  } catch(err) {
+    errBox.textContent = 'Failed to start: ' + err.message;
+    errBox.style.display = 'block';
+    btn.disabled = false;
+    btn.textContent = 'Begin Transcription';
+    return;
+  }
+
+  // Listen to SSE progress
+  const evtSource = new EventSource('/progress/' + jobId);
+  const logBox = document.getElementById('log_box');
+
+  evtSource.onmessage = function(e) {
+    const msg = JSON.parse(e.data);
+    if (msg.log) {
+      logBox.textContent += msg.log + '\\n';
+      logBox.scrollTop = logBox.scrollHeight;
+    }
+    if (msg.status === 'done') {
+      evtSource.close();
+      btn.disabled = false;
+      btn.textContent = 'Begin Transcription';
+      // Show download links
+      const dlWrap = document.getElementById('dl_wrap');
+      const dlLinks = document.getElementById('dl_links');
+      dlWrap.style.display = 'block';
+      msg.files.forEach(function(fname) {
+        const a = document.createElement('a');
+        a.href = '/download/' + jobId + '/' + encodeURIComponent(fname);
+        a.className = 'dl-btn';
+        a.textContent = '⬇ Download ' + fname;
+        a.download = fname;
+        dlLinks.appendChild(a);
+      });
+    }
+    if (msg.status === 'error') {
+      evtSource.close();
+      btn.disabled = false;
+      btn.textContent = 'Begin Transcription';
+    }
+  };
+
+  evtSource.onerror = function() {
+    evtSource.close();
+    logBox.textContent += '\\n⚠ Connection lost. Check the log above for progress.\\n';
+    btn.disabled = false;
+    btn.textContent = 'Begin Transcription';
+  };
+});
+</script>
+</body>
+</html>"""
+
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
 
