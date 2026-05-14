@@ -2,11 +2,10 @@ import os
 import base64
 import time
 import tempfile
-import json
 import threading
 import io
 
-from flask import Flask, request, jsonify, Response, send_file
+from flask import Flask, request, jsonify, send_file
 import anthropic
 import arabic_reshaper
 from bidi.algorithm import get_display
@@ -346,31 +345,17 @@ def start():
     return jsonify({"job_id": job_id})
 
 
-@app.route("/progress/<job_id>")
-def progress(job_id):
-    """Server-Sent Events stream for live progress updates."""
-    def generate():
-        sent = 0
-        while True:
-            job = jobs.get(job_id)
-            if not job:
-                yield f"data: {json.dumps({'log': 'Job not found', 'status': 'error'})}\n\n"
-                break
-
-            log = job["log"]
-            # Send any new log lines
-            while sent < len(log):
-                yield f"data: {json.dumps({'log': log[sent], 'status': job['status']})}\n\n"
-                sent += 1
-
-            if job["status"] in ("done", "error"):
-                yield f"data: {json.dumps({'log': '', 'status': job['status'], 'files': list(job['outputs'].keys())})}\n\n"
-                break
-
-            time.sleep(0.5)
-
-    return Response(generate(), mimetype="text/event-stream",
-                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+@app.route("/poll/<job_id>")
+def poll(job_id):
+    """Simple polling endpoint — browser calls this every 2 seconds."""
+    job = jobs.get(job_id)
+    if not job:
+        return jsonify({"status": "error", "log": [], "files": []})
+    return jsonify({
+        "status": job["status"],
+        "log": job["log"],
+        "files": list(job["outputs"].keys()) if job["status"] == "done" else []
+    })
 
 
 @app.route("/download/<job_id>/<filename>")
@@ -644,46 +629,54 @@ document.getElementById('form').addEventListener('submit', async function(e) {
     return;
   }
 
-  // Listen to SSE progress
-  const evtSource = new EventSource('/progress/' + jobId);
+  // Poll for progress every 2 seconds
   const logBox = document.getElementById('log_box');
+  let lastLogCount = 0;
 
-  evtSource.onmessage = function(e) {
-    const msg = JSON.parse(e.data);
-    if (msg.log) {
-      logBox.textContent += msg.log + '\\n';
-      logBox.scrollTop = logBox.scrollHeight;
-    }
-    if (msg.status === 'done') {
-      evtSource.close();
-      btn.disabled = false;
-      btn.textContent = 'Begin Transcription';
-      // Show download links
-      const dlWrap = document.getElementById('dl_wrap');
-      const dlLinks = document.getElementById('dl_links');
-      dlWrap.style.display = 'block';
-      msg.files.forEach(function(fname) {
-        const a = document.createElement('a');
-        a.href = '/download/' + jobId + '/' + encodeURIComponent(fname);
-        a.className = 'dl-btn';
-        a.textContent = '⬇ Download ' + fname;
-        a.download = fname;
-        dlLinks.appendChild(a);
-      });
-    }
-    if (msg.status === 'error') {
-      evtSource.close();
-      btn.disabled = false;
-      btn.textContent = 'Begin Transcription';
-    }
-  };
+  async function poll() {
+    try {
+      const res = await fetch('/poll/' + jobId);
+      const data = await res.json();
 
-  evtSource.onerror = function() {
-    evtSource.close();
-    logBox.textContent += '\\n⚠ Connection lost. Check the log above for progress.\\n';
-    btn.disabled = false;
-    btn.textContent = 'Begin Transcription';
-  };
+      // Append any new log lines
+      for (let i = lastLogCount; i < data.log.length; i++) {
+        logBox.textContent += data.log[i] + '\\n';
+        logBox.scrollTop = logBox.scrollHeight;
+      }
+      lastLogCount = data.log.length;
+
+      if (data.status === 'done') {
+        btn.disabled = false;
+        btn.textContent = 'Begin Transcription';
+        const dlWrap = document.getElementById('dl_wrap');
+        const dlLinks = document.getElementById('dl_links');
+        dlWrap.style.display = 'block';
+        data.files.forEach(function(fname) {
+          const a = document.createElement('a');
+          a.href = '/download/' + jobId + '/' + encodeURIComponent(fname);
+          a.className = 'dl-btn';
+          a.textContent = '⬇ Download ' + fname;
+          a.download = fname;
+          dlLinks.appendChild(a);
+        });
+        return; // stop polling
+      }
+
+      if (data.status === 'error') {
+        btn.disabled = false;
+        btn.textContent = 'Begin Transcription';
+        return; // stop polling
+      }
+
+      // Still running — poll again in 2 seconds
+      setTimeout(poll, 2000);
+    } catch(err) {
+      // Network hiccup — retry in 3 seconds
+      setTimeout(poll, 3000);
+    }
+  }
+
+  poll();
 });
 </script>
 </body>
@@ -693,4 +686,3 @@ document.getElementById('form').addEventListener('submit', async function(e) {
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
-
