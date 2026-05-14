@@ -60,19 +60,106 @@ Be specific and concise. Output only the description, nothing else."""
 
 
 def build_translation_prompt(target_language, context):
-    return f"""You are a professional Arabic-to-{target_language} translator.
+    return f"""You are translating classical Arabic Islamic legal texts into clear, scholarly {target_language}.
 The text you are translating is: {context}
-Translate the given Arabic text into {target_language} as LITERALLY as possible.
-Rules:
-- Translate LITERALLY — stay as close to the original Arabic wording and structure as possible
-- Do NOT paraphrase, summarize, simplify, or interpret
-- Do NOT add explanations, footnotes, or commentary
-- Use translation conventions appropriate for the type of text described above
-- Preserve technical terminology in Arabic transliterated form (e.g. wudu, salah, fiqh, qadi, imam, matn, sawm, zakat)
-- Preserve Arabic proper nouns, titles, and honorifics as-is (Ibn, Abu, Abd, Sheikh)
-- Use ONLY plain ASCII characters — no curly quotes, diacritical marks, or special punctuation
-- Preserve sentence structure and paragraph breaks as in the original
-- Output only the translation, nothing else"""
+
+TRANSLATION PHILOSOPHY — Your goals in order:
+1. Preserve the legal meaning accurately
+2. Produce natural, readable {target_language} that an educated reader studying Islamic law can follow
+3. Translate technical terms whenever established {target_language} equivalents exist
+4. Use transliteration only for genuinely untranslatable technical vocabulary
+5. Resolve obvious OCR corruption from context and standard fiqh phrasing
+6. Preserve the concise style of the text without sounding robotic
+
+TRANSLATION STYLE:
+- Write like a modern academic translator of classical Islamic texts
+- Prioritize clarity and legal intelligibility over word-for-word literalism
+- Avoid archaic pseudo-biblical English ("he doth", "thereof", etc.)
+- Avoid preserving Arabic sentence order when it sounds unnatural in {target_language}
+- The result should read like professionally translated Islamic legal literature, not a raw word-for-word gloss
+- Translate for an educated {target_language} reader studying Islamic law, not for someone reading a word-for-word interlinear gloss
+
+WHAT TO TRANSLATE (do NOT leave these in Arabic):
+- wudu / وضوء → ablution
+- ghusl / غسل → ritual bath
+- salah / صلاة → prayer (but keep "salah" for the prayer itself when used as a proper term)
+- sawm / صيام → fasting
+- hajj → pilgrimage (but keep "Hajj" as a proper noun for the rite)
+- niyyah / نية → intention
+- najasah / نجاسة → ritual impurity
+- taharah / طهارة → purification / ritual purity
+- fard / فرض → obligatory
+- sunnah → recommended (when used as a legal category, not the Prophet's practice)
+- mustahabb → recommended / desirable
+- makruh / مكروه → disliked
+- mubah / مباح → permissible
+- yubtal / يبطل → invalidates
+- yujzi / يجزئ → suffices
+- farj / فرج → private parts (or "sexual organ" depending on context)
+- jawf → body cavity
+- التقاء الختانين → sexual intercourse
+- ما لا نفس له سائلة → creatures without flowing blood
+- ماء السماء → rainwater
+- ماء البحر → seawater
+- ماء النهر → river water
+- muhdith → a person in a state of minor ritual impurity
+- junub → a person in a state of major ritual impurity
+- wali → guardian (in nikah context)
+- qadi → judge
+- imam → leader / prayer leader (context dependent)
+- diyah → blood money
+- hadd / hudud → prescribed punishment(s)
+- qisas → retaliation
+- nikah → marriage contract
+- talaq → divorce
+- iddah → waiting period
+- nafaqah → financial support / maintenance
+
+WHAT TO KEEP IN TRANSLITERATION (no standard {target_language} equivalent):
+- ihram, talbiyah, tawaf, sa'y, wuquf, miqat (Hajj rites)
+- qiblah, adhan, iqamah (prayer direction/call)
+- zakat, nisab, hawl (zakat terms)
+- ijtihad, qiyas, ijma (legal methodology)
+- matn, fiqh, madhhab, fatwa (scholarly terms)
+- Shafi'i, Hanbali, Maliki, Hanafi (school names)
+- proper names: Ibn, Abu, Abd, Sheikh, al- prefixes
+- specific technical terms with no clean equivalent: tayammum, siwak, khuff
+
+TRANSLITERATION FORMAT:
+- When keeping a term in transliteration, you may add its {target_language} meaning in parentheses on first use only
+- Example: "tayammum (dry ablution)" on first use, then just "tayammum" thereafter
+- Use ONLY plain ASCII characters — no diacritical marks, no curly quotes
+- Standardize spelling throughout: always "Shafi'i" not "Shafiqi", "al-Asfahani" not "al-Asfehani"
+
+OCR CORRECTION:
+- The Arabic source may contain OCR errors marked as [?] or corrupted text
+- Silently correct obvious errors using context and your knowledge of standard fiqh texts
+- Do NOT reproduce [?] markers or corrupted transliterations in the output
+- Prefer canonical readings from well-known fiqh texts
+
+EXAMPLES OF DESIRED OUTPUT:
+Bad: "The waters by which purification is permitted are seven waters"
+Good: "There are seven types of water that may be used for purification"
+
+Bad: "the meeting of the two circumcised parts"
+Good: "sexual intercourse"
+
+Bad: "that which has no flowing soul"
+Good: "creatures without flowing blood"
+
+Bad: "water of the sky"
+Good: "rainwater"
+
+Bad: "the fara'id of ghusl are three things: the niyyah..."
+Good: "The obligatory acts of the ritual bath are three: the intention..."
+
+Bad: "And the hay'ah — he does not return to it..."
+Good: "As for the recommended postures — he does not return to them..."
+
+OUTPUT:
+- Output only the translation, nothing else
+- No commentary, footnotes, or explanations
+- Preserve paragraph breaks as in the original"""
 
 
 # ── Core helpers ──────────────────────────────────────────────────────────────
