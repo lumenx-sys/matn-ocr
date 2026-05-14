@@ -282,11 +282,24 @@ def run_job(job_id, api_key, pdf_bytes, start_page, end_page,
                 translation = None
                 if do_translate:
                     log(f"🌍 Translating page {pnum} to {target_lang.title()}...")
-                    try:
-                        translation = translate_text(client, arabic, translation_prompt)
-                    except Exception as e:
-                        log(f"  ❌ Failed to translate page {pnum}: {e}")
+                    translate_result = [None]
+                    translate_error  = [None]
+                    def _do_translate(arabic=arabic):
+                        try:
+                            translate_result[0] = translate_text(client, arabic, translation_prompt)
+                        except Exception as e:
+                            translate_error[0] = e
+                    tt = threading.Thread(target=_do_translate, daemon=True)
+                    tt.start()
+                    tt.join(timeout=120)
+                    if tt.is_alive():
+                        log(f"  ⚠️ Translation of page {pnum} timed out — skipping")
+                        translation = f"[Page {pnum} translation timed out]"
+                    elif translate_error[0]:
+                        log(f"  ❌ Failed to translate page {pnum}: {translate_error[0]}")
                         translation = f"[Error translating page {pnum}]"
+                    else:
+                        translation = translate_result[0]
 
                 pages_data.append((pnum, arabic, translation))
 
