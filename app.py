@@ -192,7 +192,7 @@ jobs = {}  # job_id -> {"status": ..., "log": [...], "outputs": {...}, "error": 
 
 
 def run_job(job_id, api_key, pdf_bytes, start_page, end_page,
-            do_translate, target_lang, mode, manual_context):
+            do_translate, target_lang, mode, manual_context, request_dpi):
     job = jobs[job_id]
 
     def log(msg):
@@ -206,11 +206,34 @@ def run_job(job_id, api_key, pdf_bytes, start_page, end_page,
             f.write(pdf_bytes)
             tmp_pdf = f.name
 
-        log("🔄 Converting PDF pages to images...")
-        conv_kwargs = dict(dpi=300)
+        dpi = int(request_dpi) if request_dpi and request_dpi.isdigit() else 200
+        log(f"📥 PDF received — starting conversion...")
+        log(f"🔄 Converting PDF pages to images (quality: {'high' if dpi == 300 else 'fast'})...")
+        log(f"   This may take 1-3 minutes for a full book. Please wait...")
+        conv_kwargs = dict(dpi=dpi)
         if start_page: conv_kwargs["first_page"] = start_page
         if end_page:   conv_kwargs["last_page"]  = end_page
-        images = convert_from_path(tmp_pdf, **conv_kwargs)
+        # Convert in a sub-thread with a 3-minute timeout
+        images_result = [None]
+        convert_error = [None]
+
+        def _do_convert():
+            try:
+                images_result[0] = convert_from_path(tmp_pdf, **conv_kwargs)
+            except Exception as e:
+                convert_error[0] = e
+
+        convert_thread = threading.Thread(target=_do_convert, daemon=True)
+        convert_thread.start()
+        convert_thread.join(timeout=180)  # wait up to 3 minutes
+
+        if convert_thread.is_alive():
+            raise TimeoutError("PDF conversion timed out after 3 minutes. Try using a page range (e.g. pages 1-10) instead of the full book.")
+        if convert_error[0]:
+            raise convert_error[0]
+
+        images = images_result[0]
+
         base_page = start_page if start_page else 1
         page_numbers = list(range(base_page, base_page + len(images)))
         log(f"✅ {len(images)} pages ready")
@@ -319,6 +342,7 @@ def start():
     target_lang   = request.form.get("target_lang", "english").strip()
     mode          = request.form.get("mode", "interleaved")
     manual_context= request.form.get("manual_context", "").strip()
+    request_dpi   = request.form.get("dpi", "200")
     use_range     = request.form.get("use_range") == "true"
     start_page    = int(request.form.get("start_page", 1)) if use_range else None
     end_page      = int(request.form.get("end_page", 1))   if use_range else None
@@ -337,7 +361,7 @@ def start():
     t = threading.Thread(
         target=run_job,
         args=(job_id, api_key, pdf_bytes, start_page, end_page,
-              do_translate, target_lang, mode, manual_context),
+              do_translate, target_lang, mode, manual_context, request_dpi),
         daemon=True
     )
     t.start()
@@ -399,7 +423,7 @@ body {
   min-height: 100vh;
   display: flex;
   justify-content: center;
-  padding: 0 1rem 4rem;
+  padding: 0 1.5rem 4rem;
 }
 .wrap { width: 100%; max-width: 640px; }
 
@@ -436,9 +460,11 @@ input:focus, select:focus { border-color: var(--gold-d); }
 
 /* File upload */
 .file-drop {
+  display: block;
   border: 1px dashed var(--border); border-radius: 3px;
   background: var(--surface); padding: 1.4rem;
   text-align: center; cursor: pointer; transition: border-color .2s;
+  width: 100%; box-sizing: border-box;
 }
 .file-drop:hover { border-color: var(--gold-d); }
 .file-drop input { display: none; }
@@ -554,16 +580,28 @@ input[type=number] {
       <input type="text" name="manual_context" placeholder='e.g. "classical Arabic poetry" — leave blank to auto-detect'>
     </div>
 
+    <div class="label" style="margin-top:1.2rem">Processing quality</div>
+    <select name="dpi">
+      <option value="200">Fast — good quality (recommended)</option>
+      <option value="300">High quality — slower conversion</option>
+    </select>
+
     <input type="hidden" name="use_range" id="h_use_range" value="false">
     <input type="hidden" name="do_translate" id="h_do_translate" value="false">
 
     <button type="submit" class="btn" id="submit_btn">Begin Transcription</button>
+    <p class="caption" style="text-align:center; margin-top:.8rem;">
+      Processing takes several minutes depending on page count — please keep this tab open.
+    </p>
   </form>
 
   <div id="err_box" class="err" style="display:none"></div>
 
   <div class="log-wrap" id="log_wrap">
     <div class="label">Progress</div>
+    <p class="caption" id="working_hint" style="margin-bottom:.5rem; display:none;">
+      ⏳ Working — each page takes 15–20 seconds. The log will update as pages complete.
+    </p>
     <div class="log-box" id="log_box"></div>
   </div>
 
@@ -572,6 +610,10 @@ input[type=number] {
     <div class="label">Download</div>
     <div id="dl_links"></div>
   </div>
+
+  <p style="text-align:center; color:var(--muted); font-size:.85rem; font-style:italic; margin-top:3rem;">
+    Questions? Contact <strong style="color:var(--gold-d);">@lumenx.sys</strong> on Discord.
+  </p>
 
 </div>
 
@@ -612,6 +654,7 @@ document.getElementById('form').addEventListener('submit', async function(e) {
   document.getElementById('log_box').textContent = '';
   document.getElementById('dl_wrap').style.display = 'none';
   document.getElementById('dl_links').innerHTML = '';
+  document.getElementById('working_hint').style.display = 'block';
 
   // Submit form
   const fd = new FormData(this);
@@ -646,6 +689,7 @@ document.getElementById('form').addEventListener('submit', async function(e) {
       lastLogCount = data.log.length;
 
       if (data.status === 'done') {
+        document.getElementById('working_hint').style.display = 'none';
         btn.disabled = false;
         btn.textContent = 'Begin Transcription';
         const dlWrap = document.getElementById('dl_wrap');
@@ -663,6 +707,7 @@ document.getElementById('form').addEventListener('submit', async function(e) {
       }
 
       if (data.status === 'error') {
+        document.getElementById('working_hint').style.display = 'none';
         btn.disabled = false;
         btn.textContent = 'Begin Transcription';
         return; // stop polling
