@@ -458,12 +458,12 @@ api_key = st.text_input("", type="password", placeholder="sk-ant-...",
                          label_visibility="collapsed")
 st.caption("Your key is never stored. Get one at console.anthropic.com")
 
-st.markdown('<div class="ornament">❧ ❧ ❧</div>', unsafe_allow_html=True)
+st.markdown('<div class="ornament">· · ·</div>', unsafe_allow_html=True)
 
 st.markdown('<div class="section-label">Upload PDF</div>', unsafe_allow_html=True)
 uploaded_file = st.file_uploader("", type=["pdf"], label_visibility="collapsed")
 
-st.markdown('<div class="ornament">❧ ❧ ❧</div>', unsafe_allow_html=True)
+st.markdown('<div class="ornament">· · ·</div>', unsafe_allow_html=True)
 
 st.markdown('<div class="section-label">Options</div>', unsafe_allow_html=True)
 
@@ -495,7 +495,7 @@ if do_translate:
         placeholder='e.g. "classical Arabic poetry" — leave blank to auto-detect'
     )
 
-st.markdown('<div class="ornament">❧ ❧ ❧</div>', unsafe_allow_html=True)
+st.markdown('<div class="ornament">· · ·</div>', unsafe_allow_html=True)
 
 run = st.button("Begin Transcription")
 
@@ -549,7 +549,7 @@ if run:
         if not result_q.empty():
             status, payload = result_q.get()
             if status == "ok":
-                st.markdown('<div class="ornament">❧ ❧ ❧</div>', unsafe_allow_html=True)
+                st.markdown('<div class="ornament">· · ·</div>', unsafe_allow_html=True)
                 st.markdown('<div class="section-label">Download</div>',
                             unsafe_allow_html=True)
                 for filename, data in payload.items():
@@ -561,3 +561,4 @@ if run:
                     )
             else:
                 st.error(f"Something went wrong: {payload}")
+
