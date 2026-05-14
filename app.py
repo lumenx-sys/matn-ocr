@@ -809,6 +809,7 @@ input[type=number] {
     <div style="margin-top:1.2rem; background:#111009; border:1px solid var(--border); border-radius:3px; padding:1rem 1.2rem; font-size:.88rem; color:var(--muted); line-height:1.8;">
       <strong style="color:var(--gold-d); letter-spacing:.1em; font-size:.75rem; text-transform:uppercase;">Usage Guide</strong><br><br>
       <strong style="color:var(--text);">Page limit:</strong> For best results, process a maximum of <strong style="color:var(--text);">50 pages at a time</strong> using the page range option. Larger books should be done in batches (e.g. pages 1–50, then 51–100, etc.).<br><br>
+      <strong style="color:var(--text);">Recommended:</strong> Translate <strong style="color:var(--text);">one chapter at a time</strong> whenever possible. Each chapter covers a single topic (e.g. purification, prayer, zakat), which helps the translation stay consistent and accurate — Claude maintains better terminology choices within a focused subject area than across many unrelated chapters.<br><br>
       <strong style="color:var(--text);">Cost estimate:</strong> Transcription only ~$0.024/page · With translation ~$0.05/page<br><br>
       <strong style="color:var(--text);">API key:</strong> Get one at <a href="https://console.anthropic.com" target="_blank" style="color:var(--gold-d);">console.anthropic.com</a> — you only pay for what you use, no subscription needed. A $5 top-up covers hundreds of pages.
     </div>
