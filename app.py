@@ -10,6 +10,7 @@ import anthropic
 import arabic_reshaper
 from bidi.algorithm import get_display
 from pdf2image import convert_from_path
+from pdf2image.pdf2image import pdfinfo_from_path
 from reportlab.lib.pagesizes import A4
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
@@ -210,7 +211,6 @@ def run_job(job_id, api_key, pdf_bytes, start_page, end_page,
         BATCH_SIZE = 5  # convert and process this many pages at a time
 
         # Get total page count first using pdfinfo (very fast, no image conversion)
-        from pdf2image.pdf2image import pdfinfo_from_path
         info = pdfinfo_from_path(tmp_pdf)
         total_pages = info["Pages"]
         first = start_page if start_page else 1
@@ -230,6 +230,7 @@ def run_job(job_id, api_key, pdf_bytes, start_page, end_page,
                 log("🔍 Auto-detecting book context from first page...")
                 first_images = convert_from_path(tmp_pdf, dpi=dpi, first_page=first, last_page=first)
                 img_b64 = image_to_base64(first_images[0])
+                del first_images  # free memory immediately
                 msg = call_claude(client,
                     model="claude-sonnet-4-6", max_tokens=300,
                     system=DETECT_PROMPT,
