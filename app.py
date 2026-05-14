@@ -262,11 +262,26 @@ def run_job(job_id, api_key, pdf_bytes, start_page, end_page,
         pages_data = []
         for i, (img, pnum) in enumerate(zip(images, page_numbers)):
             log(f"🤖 Transcribing page {pnum} ({i+1}/{len(images)})...")
-            try:
-                arabic = transcribe_page(client, img)
-            except Exception as e:
-                log(f"  ❌ Failed to transcribe page {pnum}: {e}")
+
+            # Run transcription in a sub-thread with 2-minute timeout
+            transcribe_result = [None]
+            transcribe_error = [None]
+            def _do_transcribe(img=img):
+                try:
+                    transcribe_result[0] = transcribe_page(client, img)
+                except Exception as e:
+                    transcribe_error[0] = e
+            t = threading.Thread(target=_do_transcribe, daemon=True)
+            t.start()
+            t.join(timeout=120)
+            if t.is_alive():
+                log(f"  ⚠️ Page {pnum} timed out — skipping")
+                arabic = f"[Page {pnum} timed out]"
+            elif transcribe_error[0]:
+                log(f"  ❌ Failed to transcribe page {pnum}: {transcribe_error[0]}")
                 arabic = f"[Error transcribing page {pnum}]"
+            else:
+                arabic = transcribe_result[0]
 
             translation = None
             if do_translate:
