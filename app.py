@@ -43,12 +43,13 @@ register_font()
 
 # ── Prompts ───────────────────────────────────────────────────────────────────
 TRANSCRIBE_PROMPT = """You are a precise Arabic OCR transcription engine.
-Your only job is to transcribe exactly what you see in the image, character by character.
+Your only job is to transcribe the Arabic text faithfully, preserving spelling and orthography as printed.
 Rules:
-- Transcribe the Arabic text EXACTLY as it appears
-- Preserve all diacritics (harakat) exactly as they appear
+- Transcribe the Arabic text EXACTLY as it appears, preserving spelling and orthography
+- Preserve diacritics (harakat) only when clearly visible in the image — do not guess or add them
+- You may silently normalize obvious broken letter shapes into correct Arabic words when unambiguous
 - Preserve line breaks and punctuation as they appear
-- If a word or character is unclear or damaged, write [?] in its place
+- If a word is genuinely unclear or damaged beyond recognition, write [?] in its place
 - Do not add commentary, explanations, or notes
 - Do not translate anything
 - Output only the transcribed text, nothing else"""
@@ -82,7 +83,7 @@ TRANSLATION STYLE:
 WHAT TO TRANSLATE (do NOT leave these in Arabic):
 - wudu / وضوء → ablution
 - ghusl / غسل → ritual bath
-- salah / صلاة → prayer (but keep "salah" for the prayer itself when used as a proper term)
+- salah / صلاة → prayer
 - sawm / صيام → fasting
 - hajj → pilgrimage (but keep "Hajj" as a proper noun for the rite)
 - niyyah / نية → intention
@@ -155,6 +156,18 @@ Good: "The obligatory acts of the ritual bath are three: the intention..."
 
 Bad: "And the hay'ah — he does not return to it..."
 Good: "As for the recommended postures — he does not return to them..."
+
+STYLE TARGET:
+Translate into fluent, modern academic English in the style of scholarly works on Islamic law (e.g. Brill Islamic law series, Oxford Islamic legal studies). Use clear, precise legal phrasing — not literal gloss translation.
+
+ANTI-LITERALISM RULE:
+Do not translate Arabic expressions word-for-word when a natural English legal equivalent exists. Rephrase idioms and formulaic legal expressions naturally.
+
+CONSISTENCY RULE:
+Maintain consistent terminology throughout the entire text. Do not alternate between different renderings of the same term.
+
+NO ARABIC SCRIPT:
+Do not include Arabic script in the output.
 
 OUTPUT:
 - Output only the translation, nothing else
