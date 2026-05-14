@@ -288,6 +288,66 @@ def build_pdf_bytes(story):
     return buf.getvalue()
 
 
+def post_process_translation(client, pages_data, target_lang):
+    """Run a final pass over all translated pages to standardize terminology."""
+    full_text = ""
+    for pnum, arabic, translation in pages_data:
+        if translation and not translation.startswith("["):
+            full_text += "=== Page " + str(pnum) + " ===\n" + translation + "\n\n"
+
+    if not full_text.strip():
+        return pages_data
+
+    system_prompt = (
+        "You are a professional editor reviewing a translated Islamic legal text in "
+        + target_lang + ".\n"
+        "Your only job is to standardize inconsistent terminology throughout the document.\n\n"
+        "Rules:\n"
+        "- Identify any terms translated inconsistently and standardize them to the most accurate rendering\n"
+        "- Do NOT change the meaning, structure, or content of any sentence\n"
+        "- Do NOT add or remove any text\n"
+        "- Keep all page markers (=== Page N ===) exactly as they are\n"
+        "- Output the full corrected text with the same page markers, nothing else"
+    )
+
+    msg = call_claude(client,
+        model="claude-sonnet-4-6",
+        max_tokens=16000,
+        system=system_prompt,
+        messages=[{"role": "user", "content": "Please standardize the terminology in this translated text:\n\n" + full_text}]
+    )
+
+    corrected = msg.content[0].text.strip()
+
+    # Parse corrected text back into per-page translations
+    corrected_map = {}
+    current_page = None
+    current_lines = []
+    for line in corrected.split("\n"):
+        if line.startswith("=== Page ") and line.endswith(" ==="):
+            if current_page is not None:
+                corrected_map[current_page] = "\n".join(current_lines).strip()
+            try:
+                current_page = int(line.replace("=== Page ", "").replace(" ===", ""))
+            except ValueError:
+                current_page = None
+            current_lines = []
+        else:
+            current_lines.append(line)
+    if current_page is not None:
+        corrected_map[current_page] = "\n".join(current_lines).strip()
+
+    # Update pages_data with corrected translations
+    updated = []
+    for pnum, arabic, translation in pages_data:
+        if pnum in corrected_map and not (translation or "").startswith("["):
+            updated.append((pnum, arabic, corrected_map[pnum]))
+        else:
+            updated.append((pnum, arabic, translation))
+    return updated
+
+
+
 # ── Job storage (in-memory, fine for single-server Railway deploy) ─────────────
 jobs = {}  # job_id -> {"status": ..., "log": [...], "outputs": {...}, "error": ...}
 
@@ -421,6 +481,15 @@ def run_job(job_id, api_key, pdf_bytes, start_page, end_page,
                         log(f"  ❌ Giving up on page {pnum} translation after 5 attempts")
 
                 pages_data.append((pnum, arabic, translation))
+
+        # Post-processing pass to standardize terminology (only when translating)
+        if do_translate and len(pages_data) > 1:
+            log("✨ Running post-processing pass to standardize terminology...")
+            try:
+                pages_data = post_process_translation(client, pages_data, target_lang)
+                log("✅ Terminology standardized")
+            except Exception as e:
+                log(f"  ⚠️ Post-processing failed (continuing without it): {e}")
 
         log("📝 Building output PDF(s)...")
         outputs = {}
@@ -736,6 +805,13 @@ input[type=number] {
     <p class="caption" style="text-align:center; margin-top:.8rem;">
       Processing takes several minutes depending on page count — please keep this tab open.
     </p>
+
+    <div style="margin-top:1.2rem; background:#111009; border:1px solid var(--border); border-radius:3px; padding:1rem 1.2rem; font-size:.88rem; color:var(--muted); line-height:1.8;">
+      <strong style="color:var(--gold-d); letter-spacing:.1em; font-size:.75rem; text-transform:uppercase;">Usage Guide</strong><br><br>
+      <strong style="color:var(--text);">Page limit:</strong> For best results, process a maximum of <strong style="color:var(--text);">50 pages at a time</strong> using the page range option. Larger books should be done in batches (e.g. pages 1–50, then 51–100, etc.).<br><br>
+      <strong style="color:var(--text);">Cost estimate:</strong> Transcription only ~$0.024/page · With translation ~$0.05/page<br><br>
+      <strong style="color:var(--text);">API key:</strong> Get one at <a href="https://console.anthropic.com" target="_blank" style="color:var(--gold-d);">console.anthropic.com</a> — you only pay for what you use, no subscription needed. A $5 top-up covers hundreds of pages.
+    </div>
   </form>
 
   <div id="err_box" class="err" style="display:none"></div>
