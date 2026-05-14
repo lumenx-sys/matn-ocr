@@ -207,45 +207,29 @@ def run_job(job_id, api_key, pdf_bytes, start_page, end_page,
             tmp_pdf = f.name
 
         dpi = int(request_dpi) if request_dpi and request_dpi.isdigit() else 200
-        log(f"📥 PDF received — starting conversion...")
-        log(f"🔄 Converting PDF pages to images (quality: {'high' if dpi == 300 else 'fast'})...")
-        log(f"   This may take 1-3 minutes for a full book. Please wait...")
-        conv_kwargs = dict(dpi=dpi)
-        if start_page: conv_kwargs["first_page"] = start_page
-        if end_page:   conv_kwargs["last_page"]  = end_page
-        # Convert in a sub-thread with a 3-minute timeout
-        images_result = [None]
-        convert_error = [None]
+        BATCH_SIZE = 5  # convert and process this many pages at a time
 
-        def _do_convert():
-            try:
-                images_result[0] = convert_from_path(tmp_pdf, **conv_kwargs)
-            except Exception as e:
-                convert_error[0] = e
+        # Get total page count first using pdfinfo (very fast, no image conversion)
+        from pdf2image.pdf2image import pdfinfo_from_path
+        info = pdfinfo_from_path(tmp_pdf)
+        total_pages = info["Pages"]
+        first = start_page if start_page else 1
+        last  = end_page   if end_page   else total_pages
+        all_page_numbers = list(range(first, last + 1))
+        total = len(all_page_numbers)
+        log(f"📥 PDF received — {total} pages to process")
+        log(f"🔄 Processing in batches of {BATCH_SIZE} pages (quality: {'high' if dpi == 300 else 'fast'})...")
 
-        convert_thread = threading.Thread(target=_do_convert, daemon=True)
-        convert_thread.start()
-        convert_thread.join(timeout=180)  # wait up to 3 minutes
-
-        if convert_thread.is_alive():
-            raise TimeoutError("PDF conversion timed out after 3 minutes. Try using a page range (e.g. pages 1-10) instead of the full book.")
-        if convert_error[0]:
-            raise convert_error[0]
-
-        images = images_result[0]
-
-        base_page = start_page if start_page else 1
-        page_numbers = list(range(base_page, base_page + len(images)))
-        log(f"✅ {len(images)} pages ready")
-
+        # Auto-detect context from first page before batching
         translation_prompt = None
         if do_translate:
             if manual_context and manual_context.strip():
                 context = manual_context.strip()
                 log(f"📖 Using manual context: {context}")
             else:
-                log("🔍 Auto-detecting book context...")
-                img_b64 = image_to_base64(images[0])
+                log("🔍 Auto-detecting book context from first page...")
+                first_images = convert_from_path(tmp_pdf, dpi=dpi, first_page=first, last_page=first)
+                img_b64 = image_to_base64(first_images[0])
                 msg = call_claude(client,
                     model="claude-sonnet-4-6", max_tokens=300,
                     system=DETECT_PROMPT,
@@ -259,40 +243,51 @@ def run_job(job_id, api_key, pdf_bytes, start_page, end_page,
                 log(f"  📖 Detected: {context}")
             translation_prompt = build_translation_prompt(target_lang, context)
 
+        # Process in batches
         pages_data = []
-        for i, (img, pnum) in enumerate(zip(images, page_numbers)):
-            log(f"🤖 Transcribing page {pnum} ({i+1}/{len(images)})...")
+        processed = 0
+        for batch_start in range(0, total, BATCH_SIZE):
+            batch_pages = all_page_numbers[batch_start:batch_start + BATCH_SIZE]
+            batch_first = batch_pages[0]
+            batch_last  = batch_pages[-1]
 
-            # Run transcription in a sub-thread with 2-minute timeout
-            transcribe_result = [None]
-            transcribe_error = [None]
-            def _do_transcribe(img=img):
-                try:
-                    transcribe_result[0] = transcribe_page(client, img)
-                except Exception as e:
-                    transcribe_error[0] = e
-            t = threading.Thread(target=_do_transcribe, daemon=True)
-            t.start()
-            t.join(timeout=120)
-            if t.is_alive():
-                log(f"  ⚠️ Page {pnum} timed out — skipping")
-                arabic = f"[Page {pnum} timed out]"
-            elif transcribe_error[0]:
-                log(f"  ❌ Failed to transcribe page {pnum}: {transcribe_error[0]}")
-                arabic = f"[Error transcribing page {pnum}]"
-            else:
-                arabic = transcribe_result[0]
+            log(f"🔄 Converting pages {batch_first}–{batch_last} to images...")
+            batch_images = convert_from_path(tmp_pdf, dpi=dpi,
+                                             first_page=batch_first, last_page=batch_last)
 
-            translation = None
-            if do_translate:
-                log(f"🌍 Translating page {pnum} to {target_lang.title()}...")
-                try:
-                    translation = translate_text(client, arabic, translation_prompt)
-                except Exception as e:
-                    log(f"  ❌ Failed to translate page {pnum}: {e}")
-                    translation = f"[Error translating page {pnum}]"
+            for img, pnum in zip(batch_images, batch_pages):
+                processed += 1
+                log(f"🤖 Transcribing page {pnum} ({processed}/{total})...")
 
-            pages_data.append((pnum, arabic, translation))
+                transcribe_result = [None]
+                transcribe_error  = [None]
+                def _do_transcribe(img=img):
+                    try:
+                        transcribe_result[0] = transcribe_page(client, img)
+                    except Exception as e:
+                        transcribe_error[0] = e
+                t = threading.Thread(target=_do_transcribe, daemon=True)
+                t.start()
+                t.join(timeout=120)
+                if t.is_alive():
+                    log(f"  ⚠️ Page {pnum} timed out — skipping")
+                    arabic = f"[Page {pnum} timed out]"
+                elif transcribe_error[0]:
+                    log(f"  ❌ Failed to transcribe page {pnum}: {transcribe_error[0]}")
+                    arabic = f"[Error transcribing page {pnum}]"
+                else:
+                    arabic = transcribe_result[0]
+
+                translation = None
+                if do_translate:
+                    log(f"🌍 Translating page {pnum} to {target_lang.title()}...")
+                    try:
+                        translation = translate_text(client, arabic, translation_prompt)
+                    except Exception as e:
+                        log(f"  ❌ Failed to translate page {pnum}: {e}")
+                        translation = f"[Error translating page {pnum}]"
+
+                pages_data.append((pnum, arabic, translation))
 
         log("📝 Building output PDF(s)...")
         outputs = {}
