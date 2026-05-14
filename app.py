@@ -3,8 +3,6 @@ import os
 import base64
 import time
 import tempfile
-import threading
-import queue
 import anthropic
 import arabic_reshaper
 from bidi.algorithm import get_display
@@ -229,7 +227,7 @@ def image_to_base64(img):
     return base64.standard_b64encode(buf.getvalue()).decode("utf-8")
 
 
-def call_claude(client, log_q, **kwargs):
+def call_claude(client, **kwargs):
     max_retries = 3
     for attempt in range(max_retries):
         try:
@@ -237,33 +235,16 @@ def call_claude(client, log_q, **kwargs):
         except Exception as e:
             if attempt < max_retries - 1:
                 wait = 10 * (attempt + 1)
-                log_q.put(f"  ⚠ Error (attempt {attempt+1}/{max_retries}): {e}")
-                log_q.put(f"  ⏳ Retrying in {wait}s...")
                 time.sleep(wait)
             else:
                 raise e
 
 
-def detect_context(client, img, log_q):
-    log_q.put("🔍 Auto-detecting book context from first page...")
-    img_b64 = image_to_base64(img)
-    msg = call_claude(client, log_q,
-        model="claude-sonnet-4-6", max_tokens=300,
-        system=DETECT_PROMPT,
-        messages=[{"role": "user", "content": [
-            {"type": "image", "source": {"type": "base64",
-             "media_type": "image/jpeg", "data": img_b64}},
-            {"type": "text", "text": "What is the context of this text?"}
-        ]}]
-    )
-    context = msg.content[0].text.strip()
-    log_q.put(f"  📖 Detected: {context}\n")
-    return context
 
 
-def transcribe_page(client, img, log_q):
+def transcribe_page(client, img, _unused=None):
     img_b64 = image_to_base64(img)
-    msg = call_claude(client, log_q,
+    msg = call_claude(client,
         model="claude-sonnet-4-6", max_tokens=4096,
         system=TRANSCRIBE_PROMPT,
         messages=[{"role": "user", "content": [
@@ -275,8 +256,8 @@ def transcribe_page(client, img, log_q):
     return msg.content[0].text
 
 
-def translate_page(client, arabic_text, translation_prompt, log_q):
-    msg = call_claude(client, log_q,
+def translate_page(client, arabic_text, translation_prompt, _unused=None):
+    msg = call_claude(client,
         model="claude-sonnet-4-6", max_tokens=4096,
         system=translation_prompt,
         messages=[{"role": "user", "content": arabic_text}]
@@ -301,9 +282,6 @@ def sanitize(text):
     return text.encode("ascii", errors="ignore").decode("ascii")
 
 
-def escape_html(text):
-    """Escape text for safe insertion into HTML log box."""
-    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
 def add_arabic_page(story, page_num, text, styles):
@@ -345,20 +323,18 @@ def build_pdf_bytes(story):
     return buf.getvalue()
 
 
-def run_ocr(api_key, pdf_bytes, start_page, end_page,
-            do_translate, target_lang, mode, manual_context,
-            log_q, result_q):
+def run_ocr_inline(api_key, pdf_bytes, start_page, end_page,
+                   do_translate, target_lang, mode, manual_context, status_obj):
+    """Run OCR in the main Streamlit thread using st.status for live updates."""
     tmp_pdf = None
     try:
         client = anthropic.Anthropic(api_key=api_key)
 
-        # Write PDF to temp file
         with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as f:
             f.write(pdf_bytes)
             tmp_pdf = f.name
 
-        # Convert to images
-        log_q.put("🔄 Converting PDF pages to images...")
+        status_obj.write("🔄 Converting PDF pages to images...")
         conv_kwargs = dict(dpi=300)
         if start_page:
             conv_kwargs["first_page"] = start_page
@@ -367,41 +343,50 @@ def run_ocr(api_key, pdf_bytes, start_page, end_page,
         images = convert_from_path(tmp_pdf, **conv_kwargs)
         base_page = start_page if start_page else 1
         page_numbers = list(range(base_page, base_page + len(images)))
-        log_q.put(f"✅ {len(images)} pages ready\n")
+        status_obj.write(f"✅ {len(images)} pages ready")
 
-        # Detect context if translating
         translation_prompt = None
         if do_translate:
             if manual_context and manual_context.strip():
                 context = manual_context.strip()
-                log_q.put(f"📖 Using manual context: {context}\n")
+                status_obj.write(f"📖 Using manual context: {context}")
             else:
-                context = detect_context(client, images[0], log_q)
+                status_obj.write("🔍 Auto-detecting book context...")
+                img_b64 = image_to_base64(images[0])
+                msg = client.messages.create(
+                    model="claude-sonnet-4-6", max_tokens=300,
+                    system=DETECT_PROMPT,
+                    messages=[{"role": "user", "content": [
+                        {"type": "image", "source": {"type": "base64",
+                         "media_type": "image/jpeg", "data": img_b64}},
+                        {"type": "text", "text": "What is the context of this text?"}
+                    ]}]
+                )
+                context = msg.content[0].text.strip()
+                status_obj.write(f"  📖 Detected: {context}")
             translation_prompt = build_translation_prompt(target_lang, context)
 
-        # Process each page
         pages_data = []
         for i, (img, pnum) in enumerate(zip(images, page_numbers)):
-            log_q.put(f"🤖 Transcribing page {pnum} ({i+1}/{len(images)})...")
+            status_obj.write(f"🤖 Transcribing page {pnum} ({i+1}/{len(images)})...")
             try:
-                arabic = transcribe_page(client, img, log_q)
+                arabic = transcribe_page(client, img, None)
             except Exception as e:
-                log_q.put(f"  ❌ Failed to transcribe: {e}")
+                status_obj.write(f"  ❌ Failed to transcribe page {pnum}: {e}")
                 arabic = f"[Error transcribing page {pnum}: {e}]"
 
             translation = None
             if do_translate:
-                log_q.put(f"🌍 Translating page {pnum} to {target_lang.title()}...")
+                status_obj.write(f"🌍 Translating page {pnum} to {target_lang.title()}...")
                 try:
-                    translation = translate_page(client, arabic, translation_prompt, log_q)
+                    translation = translate_page(client, arabic, translation_prompt, None)
                 except Exception as e:
-                    log_q.put(f"  ❌ Failed to translate: {e}")
+                    status_obj.write(f"  ❌ Failed to translate page {pnum}: {e}")
                     translation = f"[Error translating page {pnum}: {e}]"
 
             pages_data.append((pnum, arabic, translation))
 
-        # Build output PDFs — get fresh styles for each PDF to avoid name conflicts
-        log_q.put("\n📝 Building output PDF(s)...")
+        status_obj.write("📝 Building output PDF(s)...")
         outputs = {}
 
         if not do_translate:
@@ -432,14 +417,9 @@ def run_ocr(api_key, pdf_bytes, start_page, end_page,
                 add_translation_page(tr_story, pnum, trans, target_lang, styles_tr)
             outputs[f"transcription_{target_lang}.pdf"] = build_pdf_bytes(tr_story)
 
-        log_q.put("✅ Done!")
-        result_q.put(("ok", outputs))
+        return outputs
 
-    except Exception as e:
-        log_q.put(f"\n❌ Fatal error: {e}")
-        result_q.put(("error", str(e)))
     finally:
-        # Always clean up temp file
         if tmp_pdf and os.path.exists(tmp_pdf):
             os.unlink(tmp_pdf)
 
@@ -508,57 +488,33 @@ if run:
         st.error("Please enter a target language.")
     else:
         pdf_bytes = uploaded_file.read()
-        log_q = queue.Queue()
-        result_q = queue.Queue()
+        outputs = None
+        error = None
 
-        t = threading.Thread(
-            target=run_ocr,
-            args=(api_key, pdf_bytes,
-                  int(start_page) if use_page_range and start_page else None,
-                  int(end_page) if use_page_range and end_page else None,
-                  do_translate, target_lang, mode, manual_context,
-                  log_q, result_q),
-            daemon=True
-        )
-        t.start()
-
-        st.markdown('<div class="section-label">Progress</div>', unsafe_allow_html=True)
-        log_placeholder = st.empty()
-        log_lines = []
-
-        while t.is_alive() or not log_q.empty():
-            changed = False
-            while not log_q.empty():
-                log_lines.append(escape_html(log_q.get()))
-                changed = True
-            if changed:
-                log_placeholder.markdown(
-                    '<div class="log-box">' + "\n".join(log_lines) + '</div>',
-                    unsafe_allow_html=True
+        with st.status("Processing...", expanded=True) as status:
+            try:
+                outputs = run_ocr_inline(
+                    api_key, pdf_bytes,
+                    int(start_page) if use_page_range and start_page else None,
+                    int(end_page) if use_page_range and end_page else None,
+                    do_translate, target_lang, mode, manual_context,
+                    status
                 )
-            time.sleep(0.3)
+                status.update(label="✅ Complete!", state="complete", expanded=False)
+            except Exception as e:
+                error = str(e)
+                status.update(label=f"❌ Failed: {e}", state="error", expanded=True)
 
-        # Final flush
-        while not log_q.empty():
-            log_lines.append(escape_html(log_q.get()))
-        log_placeholder.markdown(
-            '<div class="log-box">' + "\n".join(log_lines) + '</div>',
-            unsafe_allow_html=True
-        )
-
-        if not result_q.empty():
-            status, payload = result_q.get()
-            if status == "ok":
-                st.markdown('<div class="ornament">· · ·</div>', unsafe_allow_html=True)
-                st.markdown('<div class="section-label">Download</div>',
-                            unsafe_allow_html=True)
-                for filename, data in payload.items():
-                    st.download_button(
-                        label=f"⬇ Download {filename}",
-                        data=data,
-                        file_name=filename,
-                        mime="application/pdf"
-                    )
-            else:
-                st.error(f"Something went wrong: {payload}")
+        if outputs:
+            st.markdown('<div class="ornament">· · ·</div>', unsafe_allow_html=True)
+            st.markdown('<div class="section-label">Download</div>', unsafe_allow_html=True)
+            for filename, data in outputs.items():
+                st.download_button(
+                    label=f"⬇ Download {filename}",
+                    data=data,
+                    file_name=filename,
+                    mime="application/pdf"
+                )
+        elif error:
+            st.error(f"Something went wrong: {error}")
 
