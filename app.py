@@ -548,7 +548,7 @@ input[type=number] {
 
     <div class="label">Anthropic API Key</div>
     <input type="password" name="api_key" id="api_key" placeholder="sk-ant-...">
-    <p class="caption">Your key is never stored. Get one at console.anthropic.com</p>
+    <p class="caption">Your key is never stored. Get one at <a href="https://console.anthropic.com" target="_blank" style="color:var(--gold-d);">console.anthropic.com</a></p>
 
     <div class="orn">· · ·</div>
 
