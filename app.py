@@ -260,46 +260,65 @@ def run_job(job_id, api_key, pdf_bytes, start_page, end_page,
                 processed += 1
                 log(f"🤖 Transcribing page {pnum} ({processed}/{total})...")
 
-                transcribe_result = [None]
-                transcribe_error  = [None]
-                def _do_transcribe(img=img):
-                    try:
-                        transcribe_result[0] = transcribe_page(client, img)
-                    except Exception as e:
-                        transcribe_error[0] = e
-                t = threading.Thread(target=_do_transcribe, daemon=True)
-                t.start()
-                t.join(timeout=120)
-                if t.is_alive():
-                    log(f"  ⚠️ Page {pnum} timed out — skipping")
-                    arabic = f"[Page {pnum} timed out]"
-                elif transcribe_error[0]:
-                    log(f"  ❌ Failed to transcribe page {pnum}: {transcribe_error[0]}")
-                    arabic = f"[Error transcribing page {pnum}]"
-                else:
-                    arabic = transcribe_result[0]
+                arabic = None
+                for attempt in range(5):
+                    transcribe_result = [None]
+                    transcribe_error  = [None]
+                    def _do_transcribe(img=img):
+                        try:
+                            transcribe_result[0] = transcribe_page(client, img)
+                        except Exception as e:
+                            transcribe_error[0] = e
+                    t = threading.Thread(target=_do_transcribe, daemon=True)
+                    t.start()
+                    t.join(timeout=120)
+                    if t.is_alive():
+                        wait = 30 * (attempt + 1)
+                        log(f"  ⚠️ Transcription attempt {attempt+1}/5 timed out")
+                        log(f"  ⏳ Retrying in {wait}s...")
+                        time.sleep(wait)
+                    elif transcribe_error[0]:
+                        wait = 30 * (attempt + 1)
+                        log(f"  ⚠️ Transcription attempt {attempt+1}/5 failed: {transcribe_error[0]}")
+                        log(f"  ⏳ Retrying in {wait}s...")
+                        time.sleep(wait)
+                    else:
+                        arabic = transcribe_result[0]
+                        break
+                if arabic is None:
+                    arabic = f"[Failed to transcribe page {pnum} after 5 attempts]"
+                    log(f"  ❌ Giving up on page {pnum} transcription after 5 attempts")
 
                 translation = None
-                if do_translate:
+                if do_translate and not arabic.startswith("[Failed"):
                     log(f"🌍 Translating page {pnum} to {target_lang.title()}...")
-                    translate_result = [None]
-                    translate_error  = [None]
-                    def _do_translate(arabic=arabic):
-                        try:
-                            translate_result[0] = translate_text(client, arabic, translation_prompt)
-                        except Exception as e:
-                            translate_error[0] = e
-                    tt = threading.Thread(target=_do_translate, daemon=True)
-                    tt.start()
-                    tt.join(timeout=120)
-                    if tt.is_alive():
-                        log(f"  ⚠️ Translation of page {pnum} timed out — skipping")
-                        translation = f"[Page {pnum} translation timed out]"
-                    elif translate_error[0]:
-                        log(f"  ❌ Failed to translate page {pnum}: {translate_error[0]}")
-                        translation = f"[Error translating page {pnum}]"
-                    else:
-                        translation = translate_result[0]
+                    for attempt in range(5):
+                        translate_result = [None]
+                        translate_error  = [None]
+                        def _do_translate(arabic=arabic):
+                            try:
+                                translate_result[0] = translate_text(client, arabic, translation_prompt)
+                            except Exception as e:
+                                translate_error[0] = e
+                        tt = threading.Thread(target=_do_translate, daemon=True)
+                        tt.start()
+                        tt.join(timeout=120)
+                        if tt.is_alive():
+                            wait = 30 * (attempt + 1)
+                            log(f"  ⚠️ Translation attempt {attempt+1}/5 timed out")
+                            log(f"  ⏳ Retrying in {wait}s...")
+                            time.sleep(wait)
+                        elif translate_error[0]:
+                            wait = 30 * (attempt + 1)
+                            log(f"  ⚠️ Translation attempt {attempt+1}/5 failed: {translate_error[0]}")
+                            log(f"  ⏳ Retrying in {wait}s...")
+                            time.sleep(wait)
+                        else:
+                            translation = translate_result[0]
+                            break
+                    if translation is None:
+                        translation = f"[Failed to translate page {pnum} after 5 attempts]"
+                        log(f"  ❌ Giving up on page {pnum} translation after 5 attempts")
 
                 pages_data.append((pnum, arabic, translation))
 
